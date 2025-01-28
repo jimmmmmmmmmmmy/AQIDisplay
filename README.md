@@ -10,13 +10,7 @@ A native macOS menu bar application for real-time air quality monitoring, develo
 
 ## Project Overview
 
-AQIDisplay is a macOS application that lives in your menu bar and provides real-time air quality information. The project demonstrates practical application of:
-
-- Native macOS development using PyObjC
-- Real-time data visualization
-- API integration (WAQI - World Air Quality Index)
-- Local data persistence with SQLite
-- System integration features
+AQIDisplay is an AQI API wrapper for macOS using PyObjc.
 
 ## Core Components
 
@@ -47,58 +41,6 @@ AQIDisplay is a macOS application that lives in your menu bar and provides real-
 - System preferences integration
 - Launch-at-login functionality
 
-## Technical Implementation
-
-### Data Storage
-- SQLite database for historical data
-- 24-hour data retention
-- Hourly data point storage
-- Automatic database cleanup
-
-### UI Components
-- Native macOS window management
-- Custom NSView implementations
-- Dynamic chart rendering
-- Real-time updates
-
-### System Integration
-- Menu bar presence
-- Native notifications
-- System preferences integration
-- Launch-at-login capability
-
-## Project Structure
-```
-AQIDisplay/
-├── app.py                     # Main application
-├── aqi_visualization_view.py  # Data visualization
-├── detail_window.py          # Detailed view window
-├── login_item_manager.py     # System integration
-├── search_city_window.py     # Location search
-└── setup.py                  # Build configuration
-```
-
-## Key Features
-
-### Air Quality Metrics
-- Real-time AQI monitoring
-- PM2.5 and PM10 levels
-- O₃, NO₂, SO₂, CO concentrations
-- Temperature and humidity
-- Wind speed and pressure
-
-### Data Display
-- Menu bar quick view
-- Detailed historical charts
-- Color-coded indicators
-- Customizable metrics
-
-### System Features
-
-- Local data persistence
-- Automatic updates
-- Location search
-
 ## Dependencies
 
 The project uses several key libraries and frameworks:
@@ -107,9 +49,8 @@ The project uses several key libraries and frameworks:
 - requests for API communication
 - SQLite3 for data storage
 
-## TODO
+## Stuff that's still broken
 
-### Core Features
 - [ ] Fix 'Search City'
 - [ ] Implement 'About'
 - [ ] Implement Start at Login
