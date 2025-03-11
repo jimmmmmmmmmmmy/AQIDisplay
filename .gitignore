@@ -24,6 +24,7 @@ AQIDisplayzip.zip
 
 # General system files
 .DS_Store
+.gitignore
 
 # Keep these specific files
 !requirements.txt

@@ -14,6 +14,14 @@ import sys
 import os
 import tempfile
 
+# Set log file to a known writable location (user's home directory)
+log_file = os.path.join(os.path.expanduser('~'), 'aqidisplay.log')
+logging.basicConfig(
+    filename=log_file,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 class SingleInstance:
     def __init__(self):
         self.lockfile = os.path.join(tempfile.gettempdir(), 'aqidisplay.lock')
@@ -413,9 +421,9 @@ class AQIDisplay(rumps.App):
         logging.info(f"Attempting to get coordinates for {city}")
         return None  # Replace this with actual geocoding logic
     
-    def update(self, _):
+    def update(self, _, force=False):
         current_time = time.time()
-        if current_time - self.last_update_time > self.update_interval:
+        if force or (current_time - self.last_update_time > self.update_interval):
             logging.info(f"Updating data for {self.current_city}")
             self.cached_data = self.get_aqi_data(self.current_city)
             if self.cached_data:
@@ -484,7 +492,8 @@ class AQIDisplay(rumps.App):
 
     @rumps.clicked("Search City")
     def search_city(self, _):
-        if self.search_window is None:
+        if self.search_window is None or not self.search_window.window:  
+            # Check if window exists
             self.search_window = SearchCityWindow.alloc().initWithApp_(self)
         self.search_window.showWindow()
 

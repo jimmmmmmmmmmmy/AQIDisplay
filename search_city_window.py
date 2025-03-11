@@ -126,10 +126,19 @@ class SearchCityWindow(NSObject):
     def tableViewSelectionDidChange_(self, notification):
         selected_row = self.result_table.selectedRow()
         if selected_row >= 0 and selected_row < len(self.results):
-            selected_city = self.results[selected_row]['station']['name']
-            self.app.current_city = selected_city
-            self.app.update(None)
-            self.window.close()
+            result = self.results[selected_row]
+            if 'station' in result and 'name' in result['station']:
+                selected_city = result['station']['name']
+                self.app.current_city = selected_city
+                try:
+                    self.app.update(None, force=True)
+                    self.window.close()
+                except Exception as e:
+                    print(f"Error updating app with new city: {e}")
+            else:
+                print("Invalid data structure in results")
+        else:
+            print("Invalid row selected")
 
     def performSearch_(self, sender):
         location = self.location_input.stringValue()
