@@ -14,6 +14,7 @@ import sys
 import os
 import tempfile
 
+
 # Set log file to a known writable location (user's home directory)
 log_file = os.path.join(os.path.expanduser('~'), 'aqidisplay.log')
 logging.basicConfig(
@@ -100,6 +101,7 @@ class AQIDisplay(rumps.App):
         self.current_city_name = self.get_city_name_ip()
         self.temperature_unit = "°F"
         self.format_options = {
+            'City': True,
             'AQI': True,
             'PM2.5': False,
             'PM10': False,
@@ -253,6 +255,8 @@ class AQIDisplay(rumps.App):
             'raw_data': data  # Include the full raw data for potential future use
         }
 
+
+
     def get_aqi_data(self, location):
         logging.info(f"get_aqi_data called with location: {location}")
         
@@ -260,39 +264,31 @@ class AQIDisplay(rumps.App):
             logging.error("Location is empty or None")
             return None
         
-
-        
-        # Check if the location is in the format of coordinates
-        if re.match(r'^-?\d+(\.\d+)?,-?\d+(\.\d+)?$', location):
-            # Round coordinates to 3 decimal places
-            try:
-                lat, lon = map(float, location.split(','))
-            except ValueError:
-                logging.error(f"Invalid coordinate format: {location}")
-                return None
+        if location.startswith('@'):
+            # Use station UID
+            url = f"{self.base_url}/feed/{location}/?token={self.token}"
+        elif re.match(r'^-?\d+(\.\d+)?,-?\d+(\.\d+)?$', location):
+            # Use coordinates (lat,lon)
+            lat, lon = map(float, location.split(','))
             rounded_location = f"{lat:.3f};{lon:.3f}"
             url = f"{self.base_url}/feed/geo:{rounded_location}/?token={self.token}"
-            logging.info(f"Using rounded coordinate-based URL: {url}")
         else:
-            # Use the location name directly
-            url = f"{self.base_url}/feed/geo:{location}/?token={self.token}"
-            logging.info(f"Using city-based URL: {url}")
-        
+            # Use city name
+            url = f"{self.base_url}/feed/{location}/?token={self.token}"
         
         logging.info(f"Sending GET request to: {url}")
-        response = requests.get(url, timeout=10)
-        logging.info(f"Received response with status code: {response.status_code}")
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        logging.info(f"Parsed JSON response: {json.dumps(data, indent=2)}")
-        
-        if data['status'] == 'ok':
-            self.store_aqi_data(data['data'])
-            return data['data']
-        else:
-            logging.error(f"API returned non-OK status: {data['status']}")
+        try:
+            response = requests.get(url, timeout=10)
+            logging.info(f"Received response with status code: {response.status_code}")
+            response.raise_for_status()
+            data = response.json()
+            if data['status'] == 'ok':
+                return data['data']
+            else:
+                logging.error(f"API returned non-OK status: {data['status']}")
+                return None
+        except requests.RequestException as e:
+            logging.error(f"Request failed: {e}")
             return None
         
     def store_aqi_data(self, data):
@@ -427,6 +423,7 @@ class AQIDisplay(rumps.App):
             logging.info(f"Updating data for {self.current_city}")
             self.cached_data = self.get_aqi_data(self.current_city)
             if self.cached_data:
+                self.current_city_name = self.cached_data['city']['name']  # Set from API response
                 self.store_aqi_data(self.cached_data)
             self.last_update_time = current_time
             self.prune_old_data()  # Prune old data after each update
@@ -443,8 +440,8 @@ class AQIDisplay(rumps.App):
         data = self.cached_data
         iaqi = data.get('iaqi', {})
 
-        #if self.format_options['City']:
-        #    title_parts.append(self.current_city_name)
+        if self.format_options['City']:
+            title_parts.append(self.current_city_name)
         if self.format_options['AQI']:
             title_parts.append(f"AQI: {data['aqi']}")
         if self.format_options['PM2.5']:
@@ -476,19 +473,6 @@ class AQIDisplay(rumps.App):
             title_parts.append(f"{iaqi.get('w', {}).get('v', 'N/A')}m/s")
 
         self.title = " | ".join(title_parts)
-
-    @rumps.clicked("About")
-    def search_city(self, _):
-        response = rumps.Window('Enter city name:', 'Search City', default_text=self.current_city).run()
-        if response.clicked:
-            new_city = response.text
-            data = self.get_aqi_data(new_city)
-            if data:
-                self.current_city = new_city
-                self.cached_data = data
-                self.update(None)
-            else:
-                rumps.notification("Error", f"Could not find data for {new_city}", "")
 
     @rumps.clicked("Search City")
     def search_city(self, _):

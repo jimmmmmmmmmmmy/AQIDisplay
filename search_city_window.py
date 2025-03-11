@@ -127,18 +127,16 @@ class SearchCityWindow(NSObject):
         selected_row = self.result_table.selectedRow()
         if selected_row >= 0 and selected_row < len(self.results):
             result = self.results[selected_row]
-            if 'station' in result and 'name' in result['station']:
-                selected_city = result['station']['name']
-                self.app.current_city = selected_city
-                try:
-                    self.app.update(None, force=True)
+            if 'uid' in result:
+                self.app.current_city = f"@{result['uid']}"
+                self.app.current_city_name = result['station']['name']
+                self.app.update(None, force=True)
+                if self.app.cached_data:  # Only close if update succeeds
                     self.window.close()
-                except Exception as e:
-                    print(f"Error updating app with new city: {e}")
+                else:
+                    logging.error("Update failed, keeping window open")
             else:
-                print("Invalid data structure in results")
-        else:
-            print("Invalid row selected")
+                logging.error("No UID found in result")
 
     def performSearch_(self, sender):
         location = self.location_input.stringValue()
