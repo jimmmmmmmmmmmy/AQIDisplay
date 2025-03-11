@@ -1,4 +1,4 @@
-This is a macOS menu bar script for air quality visualization, written in PyObjC. It displays 24-hour air quality and weather data—such as AQI, PM2.5, and temperature—using color-coded charts and headers. 
+This is a macOS menu bar script for air quality visualization, written in PyObjC. It displays 24-hour air quality, humidity, temperature, etc.
 
 Data is retrieved from WAQI.info's API via JSON requests, stored in SQLite using the sqlite3 library, and shown in a menu bar at the top of my screen.
 
