@@ -101,7 +101,7 @@ class AQIDisplay(rumps.App):
         self.current_city_name = self.get_city_name_ip()
         self.temperature_unit = "°F"
         self.format_options = {
-            'City': True,
+            'City': False,
             'AQI': True,
             'PM2.5': False,
             'PM10': False,
@@ -258,7 +258,7 @@ class AQIDisplay(rumps.App):
 
 
     def get_aqi_data(self, location):
-        logging.info(f"get_aqi_data called with location: {location}")
+        print(f"get_aqi_data called with location: {location}")
         
         if not location:
             logging.error("Location is empty or None")
@@ -267,21 +267,18 @@ class AQIDisplay(rumps.App):
         if location.startswith('@'):
             # Use station UID
             url = f"{self.base_url}/feed/{location}/?token={self.token}"
-        elif re.match(r'^-?\d+(\.\d+)?,-?\d+(\.\d+)?$', location):
-            # Use coordinates (lat,lon)
-            lat, lon = map(float, location.split(','))
+        else: 
+            lat, lon = map(float, location.split(';'))
             rounded_location = f"{lat:.3f};{lon:.3f}"
             url = f"{self.base_url}/feed/geo:{rounded_location}/?token={self.token}"
-        else:
-            # Use city name
-            url = f"{self.base_url}/feed/{location}/?token={self.token}"
-        
-        logging.info(f"Sending GET request to: {url}")
+            print(url)
+        print(f"Sending GET request to: {url}")
         try:
             response = requests.get(url, timeout=10)
-            logging.info(f"Received response with status code: {response.status_code}")
+            print(f"Received response with status code: {response.status_code}")
             response.raise_for_status()
             data = response.json()
+            print(data)
             if data['status'] == 'ok':
                 return data['data']
             else:
@@ -420,7 +417,7 @@ class AQIDisplay(rumps.App):
     def update(self, _, force=False):
         current_time = time.time()
         if force or (current_time - self.last_update_time > self.update_interval):
-            logging.info(f"Updating data for {self.current_city}")
+            print(f"Updating data for {self.current_city}")
             self.cached_data = self.get_aqi_data(self.current_city)
             if self.cached_data:
                 self.current_city_name = self.cached_data['city']['name']  # Set from API response
@@ -433,7 +430,7 @@ class AQIDisplay(rumps.App):
             self.update_title()
         else:
             logging.error("Failed to update data")
-            self.title = "Failed to update"
+            self.update_title()
 
     def update_title(self):
         title_parts = []

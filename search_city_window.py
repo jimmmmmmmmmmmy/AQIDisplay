@@ -76,8 +76,7 @@ class SearchCityWindow(NSObject):
         columns = [
             ("City", 280),
             ("AQI", 60),
-            ("Latitude", 100),
-            ("Longitude", 100)
+            ("Time", 200)
         ]
         for title, width in columns:
             column = NSTableColumn.alloc().initWithIdentifier_(title)
@@ -117,10 +116,8 @@ class SearchCityWindow(NSObject):
             return result['station']['name']
         elif column_id == "AQI":
             return str(result['aqi'])
-        elif column_id == "Latitude":
-            return str(result['station']['geo'][0])
-        elif column_id == "Longitude":
-            return str(result['station']['geo'][1])
+        elif column_id == "Time":
+            return str(result['time']['stime'])
 
 
     def tableViewSelectionDidChange_(self, notification):
@@ -146,6 +143,7 @@ class SearchCityWindow(NSObject):
             data = response.json()
             if data['status'] == 'ok':
                 self.results = data['data']
+                print(self.results)
             else:
                 print(f"Error: {data['data']}")
                 self.results = []
