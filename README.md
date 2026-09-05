@@ -1,5 +1,39 @@
-This is a macOS menu bar script for air quality visualization, written in PyObjC. It displays 24-hour air quality, humidity, temperature, etc.
+# OpenAir
 
-Data is retrieved from WAQI.info's API via JSON requests, stored in SQLite using the sqlite3 library, and shown in a menu bar at the top of my screen.
+A native macOS menu bar app for air quality, station history, and weather.
 
-<img width="528" alt="Screenshot 2025-03-11 at 2 06 44 PM" src="https://github.com/user-attachments/assets/a0db2d0a-b160-42f8-9f50-d659759afd2a" />
+## Features
+
+- Compact menu bar readings with a color-coded air quality indicator
+- Location search and automatic refresh every five minutes
+- A 24-hour chart with available historical station readings
+- Visible pollutant readings and local weather
+
+## Requirements
+
+macOS Tahoe 26 or later. Building requires Swift 6.2 or later and the macOS 26 SDK.
+
+## Build and run
+
+```sh
+python3 build_native.py
+open dist-native/OpenAir.app
+```
+
+Add a [WAQI API key](https://aqicn.org/data-platform/token/) in Settings. Automatic Location finds a nearby station using your internet connection.
+
+## Data
+
+Readings come from [WAQI](https://aqicn.org/). Current readings must be from the station's local day and within three hours. Earlier observations are imported from the station's public chart when available. Missing hours remain empty.
+
+Settings, the API key, and saved history stay in `~/Library/Application Support/OpenAir/`.
+
+## Development
+
+```sh
+swift run OpenAirChecks
+```
+
+The suite covers data validation, observation freshness, station history, and backfill. Builds are locally signed and are not notarized.
+
+The earlier Python implementation is retained. See [Python setup](PYTHON-REPAIR.md).

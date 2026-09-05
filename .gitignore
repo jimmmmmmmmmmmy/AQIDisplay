@@ -24,8 +24,17 @@ AQIDisplayzip.zip
 
 # General system files
 .DS_Store
-.gitignore
-*.plist
 
 # Keep these specific files
 !requirements.txt
+.venv/
+work/
+waqi-token
+settings.json
+*.db-*
+build-reviewed/
+dist-reviewed/
+.build/
+.swiftpm/
+dist-native/
+*.app/

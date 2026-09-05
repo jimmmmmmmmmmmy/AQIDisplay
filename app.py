@@ -1,161 +1,114 @@
-import rumps
-import requests
+"""OpenAir macOS menu-bar application."""
+import logging
+from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor
 import time
-from AppKit import NSApplication, NSBundle
+import webbrowser
+import subprocess
+import rumps
+from AppKit import NSApplication
 from detail_window import DetailWindow
 from search_city_window import SearchCityWindow
-import logging
-import re
-import json
-from datetime import datetime, timedelta
-import sqlite3
-import socket
-import sys
-import os
-import tempfile
-
-
-# Set log file to a known writable location (user's home directory)
-log_file = os.path.join(os.path.expanduser("~"), "aqidisplay.log")
-logging.basicConfig(
-    filename=log_file,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
-
-
-class SingleInstance:
-    def __init__(self):
-        self.lockfile = os.path.join(tempfile.gettempdir(), "aqidisplay.lock")
-        self.sock = None
-
-    def cleanup(self):
-        """Clean up the lock file and socket."""
-        try:
-            if self.sock:
-                self.sock.close()
-            if os.path.exists(self.lockfile):
-                os.unlink(self.lockfile)
-        except Exception as e:
-            logging.error(f"Error cleaning up single instance: {e}")
-
-    def is_running(self):
-        """Check if another instance is running."""
-        try:
-            # Clean up any stale lock file
-            if os.path.exists(self.lockfile):
-                # Check if the process is actually running
-                with open(self.lockfile, "r") as f:
-                    pid = int(f.read().strip())
-                try:
-                    # Check if process is actually running
-                    os.kill(pid, 0)
-                except OSError:
-                    # Process is not running, clean up stale lock file
-                    logging.info("Found stale lock file, cleaning up")
-                    self.cleanup()
-                else:
-                    # Process is running
-                    return True
-
-            # Create new lock file
-            with open(self.lockfile, "w") as f:
-                f.write(str(os.getpid()))
-
-            return False
-
-        except Exception as e:
-            logging.error(f"Error in single instance check: {e}")
-            # If anything goes wrong, assume it's safe to start
-            return False
-
-    def __del__(self):
-        self.cleanup()
-
-
-info = NSBundle.mainBundle().infoDictionary()
-info["LSUIElement"] = "1"
-
-logging.basicConfig(
-    filename="aqidisplay.log",
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
-
-
-def is_app_running():
-    """Check if another instance is running using a socket."""
-    try:
-        # Try to create a socket with a unique name
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # Use abstract namespace for socket
-        sock.bind("\0openair_instance_check")
-        # Keep the socket open - it will be automatically closed when the app exits
-        return False
-    except socket.error:
-        return True
+from core import Client, APIError, History, SingleInstance, data_dir, load_settings, save_settings, Redact
 
 
 class AQIDisplay(rumps.App):
     def __init__(self):
-        super(AQIDisplay, self).__init__("AQI")
-        self.instance_manager = SingleInstance()
-        self.quit_button = "Quit AQI Display"
-        self.token = "09975e52f3b1bf07469353eabdeb513092b85f9d"
-        self.base_url = "https://api.waqi.info"
-        self.user_ip = self.get_user_ip()
-        self.current_city = self.get_location_from_ip() or "San Francisco"
-        self.current_city_name = self.get_city_name_ip()
-        self.temperature_unit = "°F"
-        self.format_options = {
-            "City": False,
-            "AQI": True,
-            "PM2.5": False,
-            "PM10": False,
-            "O\u2083": False,
-            "NO\u2082": False,
-            "SO\u2082": False,
-            "CO": False,
-            "Temperature": True,
-            "Humidity": True,
-            "Wind": False,
-        }
-        self.temperature_unit = "°F"
-        self.setup_menu()
+        super().__init__("OpenAir", title="OpenAir · Loading")
+        self.quit_button = "Quit OpenAir"
+        settings = load_settings()
+        self.current_city = settings.get('city', 'here')
+        if not isinstance(self.current_city, str) or not self.current_city:
+            self.current_city = 'here'
+        self.current_city_name = self.current_city
+        self.temperature_unit = settings.get('temperature_unit', '°F')
+        if self.temperature_unit not in ('°F', '°C'):
+            self.temperature_unit = '°F'
+        self.format_options = {"City": False, "AQI": True, "PM2.5": False,
+            "PM10": False, "O₃": False, "NO₂": False, "SO₂": False, "CO": False,
+            "Temperature": True, "Humidity": False, "Wind": False}
+        saved_format = settings.get('format_options', {})
+        if isinstance(saved_format, dict):
+            self.format_options.update({k: v for k, v in saved_format.items()
+                if k in self.format_options and isinstance(v, bool)})
+        self.client = Client()
         self.cached_data = None
+        self.error = None
         self.last_update_time = 0
-        self.db_connection = sqlite3.connect("aqi_data.db")
-        self.create_table()
-        self.update_interval = 300  # 1 hour in seconds
-        self.timer = rumps.Timer(self.update, self.update_interval)
-        self.timer.start()
-        self.update(None)  # Initial update
+        self.update_interval = 300
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.pending = None
+        self.pending_city = None
+        self.history = History(data_dir() / 'aqi_data.db')
+        self.setup_menu()
         self.detail_window = DetailWindow.alloc().initWithApp_(self)
-        self.prune_old_data()  # Prune old data on startup
-        self.search_window = None  # Don't delete this again lol...
+        self.search_window = None
+        self.timer = rumps.Timer(self.update, 0.5)
+        self.timer.start()
+        self.update(None, force=True)
 
-    def create_table(self):
-        cursor = self.db_connection.cursor()
-        cursor.execute(
-            """
-        CREATE TABLE IF NOT EXISTS aqi_data (
-            timestamp TEXT PRIMARY KEY,
-            city TEXT,
-            aqi INTEGER,
-            pm25 REAL,
-            pm10 REAL,
-            o3 REAL,
-            no2 REAL,
-            so2 REAL,
-            co REAL,
-            temperature REAL,
-            pressure REAL,
-            humidity REAL,
-            wind REAL
-        )
-        """
-        )
-        self.db_connection.commit()
+    def save_preferences(self):
+        settings = load_settings()
+        settings.update(city=self.current_city, temperature_unit=self.temperature_unit,
+                        format_options=self.format_options)
+        save_settings(settings)
+
+    @rumps.clicked("Open settings folder")
+    def open_settings(self, _):
+        subprocess.run(['open', str(data_dir())], check=False)
+
+    def open_source(self, _):
+        webbrowser.open('https://aqicn.org/')
+
+    @rumps.clicked("Refresh now")
+    def refresh(self, _):
+        self.update(None, force=True)
+
+    def select_city(self, city, name):
+        self.current_city = city
+        self.current_city_name = name
+        self.cached_data = None
+        self.error = None
+        self.update_title()
+        self.last_update_time = 0
+        self.save_preferences()
+        self.update(None, force=True)
+
+    def update(self, _, force=False):
+        if self.search_window:
+            self.search_window.poll_search()
+        if self.pending and self.pending.done():
+            future, city = self.pending, self.pending_city
+            self.pending = None
+            if city == self.current_city:
+                try:
+                    data = future.result()
+                    self.cached_data = data
+                    self.current_city_name = data['city']['name']
+                    self.error = None
+                    self.status_item.title = 'Fetched ' + time.strftime('%H:%M')
+                    observed = data.get('time', {})
+                    self.observed_item.title = 'Station time: ' + str(observed.get('s', 'unavailable') if isinstance(observed, dict) else 'unavailable')
+                    self.history.store(data)
+                    providers = ', '.join(x.get('name', '') for x in data.get('attributions', []) if isinstance(x, dict))
+                    self.source_item.title = 'Data: WAQI' + (' / ' + providers if providers else '')
+                except APIError as error:
+                    self.error = str(error)
+                    self.status_item.title = self.error
+                except Exception:
+                    self.error = 'Could not save or display reading'
+                    self.status_item.title = self.error
+                    logging.error('Reading processing failed')
+                self.update_title()
+        if not self.pending and (force or time.monotonic() - self.last_update_time >= self.update_interval):
+            self.client = Client()
+            self.pending_city = self.current_city
+            self.pending = self.executor.submit(self.client.feed, self.current_city)
+            self.last_update_time = time.monotonic()
+            self.status_item.title = 'Refreshing…'
+
+    def get_stored_data(self):
+        return self.history.recent(self.current_city_name)
 
     def setup_menu(self):
         format_menu = rumps.MenuItem("Format Options")
@@ -175,20 +128,26 @@ class AQIDisplay(rumps.App):
         format_menu.add(None)  # Separator
         format_menu.add(rumps.MenuItem("Reset", callback=self.reset_format_options))
 
-        self.menu = ["Search City", format_menu, "Details...", None]
+        self.status_item = rumps.MenuItem("Starting…")
+        self.observed_item = rumps.MenuItem("Station time: waiting for data")
+        self.source_item = rumps.MenuItem("Data: WAQI / station providers", callback=self.open_source)
+        self.menu = [self.status_item, self.observed_item, "Refresh now", "Search City", format_menu, "Details...",
+                     "Open settings folder", self.source_item, None]
         self.update_format_menu()  # Call this to set initial states
 
     def toggle_format_option(self, sender):
         self.format_options[sender.title] = not sender.state
         self.update_format_menu()
-        self.update(None)
+        self.save_preferences()
+        self.update_title()
 
     def reset_format_options(self, _):
         for option in self.format_options:
             self.format_options[option] = option in ["AQI", "Temperature", "Humidity"]
         self.temperature_unit = "°F"
         self.update_format_menu()
-        self.update(None)
+        self.save_preferences()
+        self.update_title()
 
     def update_format_menu(self):
         format_menu = self.menu["Format Options"]
@@ -199,48 +158,6 @@ class AQIDisplay(rumps.App):
                     if item.title == "Temperature":
                         for subitem in item.values():
                             subitem.state = subitem.title == self.temperature_unit
-
-    def get_user_ip(self):
-        try:
-            response = requests.get("https://api.ipify.org?format=json")
-            return response.json()["ip"]
-        except:
-            return None
-
-    def get_city_name_ip(self):
-        ip = self.get_user_ip()
-        if ip:
-            url = f"{self.base_url}/feed/here/?token={self.token}"
-            response = requests.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                if data["status"] == "ok":
-                    return data["data"]["city"]["name"]
-        return None
-
-    def get_location_from_ip(self):
-        if self.user_ip:
-            url = f"{self.base_url}/feed/here/?token={self.token}"
-            try:
-                response = requests.get(url)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data["status"] == "ok":
-                        city = data["data"]["city"]
-                        if isinstance(city, dict):
-                            if "geo" in city:
-                                lat, lon = city["geo"]
-                                return (
-                                    f"{lat:.3f};{lon:.3f}"  # Return rounded coordinates
-                                )
-                            return city.get("name")
-                        return city
-            except Exception as e:
-                logging.error(f"Error getting location from IP: {e}")
-        return None
-
-    def applicationSupportsSecureRestorableState_(self, app):
-        return True
 
     def parse_api_data(self, data):
         iaqi = data.get("iaqi", {})
@@ -280,198 +197,10 @@ class AQIDisplay(rumps.App):
             "raw_data": data,  # Include the full raw data for potential future use
         }
 
-    def get_aqi_data(self, location):
-        print(f"get_aqi_data called with location: {location}")
-
-        if not location:
-            logging.error("Location is empty or None")
-            return None
-
-        if location.startswith("@"):
-            # Use station UID
-            url = f"{self.base_url}/feed/{location}/?token={self.token}"
-        else:
-            lat, lon = map(float, location.split(";"))
-            rounded_location = f"{lat:.3f};{lon:.3f}"
-            url = f"{self.base_url}/feed/geo:{rounded_location}/?token={self.token}"
-            print(url)
-        print(f"Sending GET request to: {url}")
-        try:
-            response = requests.get(url, timeout=10)
-            print(f"Received response with status code: {response.status_code}")
-            response.raise_for_status()
-            data = response.json()
-            print(data)
-            if data["status"] == "ok":
-                return data["data"]
-            else:
-                logging.error(f"API returned non-OK status: {data['status']}")
-                return None
-        except requests.RequestException as e:
-            logging.error(f"Request failed: {e}")
-            return None
-
-    def store_aqi_data(self, data):
-        cursor = self.db_connection.cursor()
-        current_time = datetime.now()
-        current_hour = current_time.strftime("%Y-%m-%d %H")
-
-        try:
-            # Check if we already have data for this hour
-            cursor.execute(
-                """
-            SELECT COUNT(*) FROM aqi_data 
-            WHERE strftime('%Y-%m-%d %H', timestamp) = ?
-            """,
-                (current_hour,),
-            )
-
-            count = cursor.fetchone()[0]
-
-            if count > 0:
-                # Update existing record for this hour
-                cursor.execute(
-                    """
-                UPDATE aqi_data 
-                SET timestamp = ?, 
-                    city = ?,
-                    aqi = ?, 
-                    pm25 = ?, 
-                    pm10 = ?, 
-                    o3 = ?, 
-                    no2 = ?, 
-                    so2 = ?, 
-                    co = ?, 
-                    temperature = ?, 
-                    pressure = ?, 
-                    humidity = ?, 
-                    wind = ?
-                WHERE strftime('%Y-%m-%d %H', timestamp) = ?
-                """,
-                    (
-                        current_time.isoformat(),
-                        str(data["city"]["name"]),
-                        int(data["aqi"]),
-                        float(data.get("iaqi", {}).get("pm25", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("pm10", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("o3", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("no2", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("so2", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("co", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("t", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("p", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("h", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("w", {}).get("v", 0) or 0),
-                        current_hour,
-                    ),
-                )
-            else:
-                # Insert new record
-                cursor.execute(
-                    """
-                INSERT INTO aqi_data
-                (timestamp, city, aqi, pm25, pm10, o3, no2, so2, co, temperature, pressure, humidity, wind)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        current_time.isoformat(),
-                        str(data["city"]["name"]),
-                        int(data["aqi"]),
-                        float(data.get("iaqi", {}).get("pm25", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("pm10", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("o3", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("no2", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("so2", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("co", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("t", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("p", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("h", {}).get("v", 0) or 0),
-                        float(data.get("iaqi", {}).get("w", {}).get("v", 0) or 0),
-                    ),
-                )
-
-            self.db_connection.commit()
-            logging.info(f"Successfully stored/updated data for hour {current_hour}")
-        except Exception as e:
-            logging.error(f"Error storing data: {str(e)}")
-            self.db_connection.rollback()
-
-    def get_stored_data(self):
-        cursor = self.db_connection.cursor()
-        twenty_four_hours_ago = (datetime.now() - timedelta(hours=24)).isoformat()
-
-        # Get one reading per hour for the last 24 hours
-        cursor.execute(
-            """
-        WITH HourlyData AS (
-            SELECT *,
-                strftime('%Y-%m-%d %H', timestamp) as hour,
-                ROW_NUMBER() OVER (PARTITION BY strftime('%Y-%m-%d %H', timestamp) 
-                                    ORDER BY timestamp DESC) as rn
-            FROM aqi_data
-            WHERE timestamp > ?
-        )
-        SELECT timestamp, city, aqi, pm25, pm10, o3, no2, so2, co, 
-            temperature, pressure, humidity, wind
-        FROM HourlyData
-        WHERE rn = 1
-        ORDER BY timestamp ASC
-        """,
-            (twenty_four_hours_ago,),
-        )
-
-        data = cursor.fetchall()
-        logging.info(f"Retrieved {len(data)} hourly readings from the last 24 hours")
-        return data
-
-    def clean_hourly_duplicates(self):
-        """Keep only the most recent reading for each hour."""
-        cursor = self.db_connection.cursor()
-
-        try:
-            # Delete all but the most recent reading for each hour
-            cursor.execute(
-                """
-            DELETE FROM aqi_data
-            WHERE rowid NOT IN (
-                SELECT MIN(rowid)
-                FROM aqi_data
-                GROUP BY strftime('%Y-%m-%d %H', timestamp)
-            )
-            """
-            )
-            rows_deleted = cursor.rowcount
-            self.db_connection.commit()
-            logging.info(f"Cleaned up {rows_deleted} duplicate hourly readings")
-        except Exception as e:
-            logging.error(f"Error cleaning hourly duplicates: {str(e)}")
-            self.db_connection.rollback()
-
-    def get_coordinates_for_city(self, city):
-        logging.info(f"Attempting to get coordinates for {city}")
-        return None  # Replace this with actual geocoding logic
-
-    def update(self, _, force=False):
-        current_time = time.time()
-        if force or (current_time - self.last_update_time > self.update_interval):
-            print(f"Updating data for {self.current_city}")
-            self.cached_data = self.get_aqi_data(self.current_city)
-            if self.cached_data:
-                self.current_city_name = self.cached_data["city"][
-                    "name"
-                ]  # Set from API response
-                self.store_aqi_data(self.cached_data)
-            self.last_update_time = current_time
-            self.prune_old_data()  # Prune old data after each update
-
-        if self.cached_data:
-            logging.info("Data update successful, updating title")
-            self.update_title()
-        else:
-            logging.error("Failed to update data")
-            self.update_title()
-
     def update_title(self):
+        if not self.cached_data:
+            self.title = "OpenAir · Setup" if not self.client.token else "OpenAir · Offline"
+            return
         title_parts = []
         data = self.cached_data
         iaqi = data.get("iaqi", {})
@@ -508,7 +237,7 @@ class AQIDisplay(rumps.App):
         if self.format_options["Wind"]:
             title_parts.append(f"{iaqi.get('w', {}).get('v', 'N/A')}m/s")
 
-        self.title = " | ".join(title_parts)
+        self.title = (" | ".join(title_parts) or "OpenAir") + (" · Stale" if self.error else "")
 
     @rumps.clicked("Search City")
     def search_city(self, _):
@@ -522,7 +251,8 @@ class AQIDisplay(rumps.App):
     def set_temperature_unit(self, sender):
         self.temperature_unit = sender.title
         self.update_format_menu()
-        self.update(None)
+        self.save_preferences()
+        self.update_title()
 
     @rumps.clicked("Details...")
     def show_details(self, _):
@@ -549,44 +279,27 @@ class AQIDisplay(rumps.App):
         else:
             rumps.notification("Error", "Failed to fetch AQI data", "")
 
-    def terminate(self):
-        """Clean up when app terminates."""
-        self.instance_manager.cleanup()
-        super(AQIDisplay, self).terminate()
-
-    def prune_old_data(self):
-        """Remove data older than 24 hours."""
-        cursor = self.db_connection.cursor()
-        twenty_four_hours_ago = (datetime.now() - timedelta(hours=24)).isoformat()
-
-        try:
-            cursor.execute(
-                "DELETE FROM aqi_data WHERE timestamp < ?", (twenty_four_hours_ago,)
-            )
-            rows_deleted = cursor.rowcount
-            self.db_connection.commit()
-            logging.info(f"Pruned {rows_deleted} readings older than 24 hours")
-
-            # After pruning, clean up any remaining hourly duplicates
-            self.clean_hourly_duplicates()
-        except Exception as e:
-            logging.error(f"Error pruning old data: {str(e)}")
-            self.db_connection.rollback()
 
 
-if __name__ == "__main__":
+def main():
+    handler = RotatingFileHandler(data_dir() / 'openair.log', maxBytes=1_000_000, backupCount=2)
+    handler.addFilter(Redact())
+    logging.basicConfig(handlers=[handler], level=logging.INFO, force=True)
     instance = SingleInstance()
-
     if instance.is_running():
-        print("AQI Display is already running")
-        sys.exit(0)
-
+        return
+    app = None
     try:
+        NSApplication.sharedApplication().setActivationPolicy_(1)
         app = AQIDisplay()
         app.run()
-    except Exception as e:
-        logging.error(f"Error running app: {e}")
-        instance.cleanup()
-        raise
     finally:
+        if app:
+            app.timer.stop()
+            app.executor.shutdown(wait=False, cancel_futures=True)
+            app.history.connection.close()
         instance.cleanup()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,5 +1,5 @@
 import objc
-from AppKit import (NSView, NSColor, NSBezierPath, NSFont, NSFontAttributeName, 
+from AppKit import (NSView, NSColor, NSBezierPath, NSFont, NSFontAttributeName,
                     NSForegroundColorAttributeName, NSString, NSMakePoint, NSMakeRect,
                     NSTextAlignmentCenter, NSParagraphStyleAttributeName, NSLineBreakByWordWrapping)
 
@@ -18,9 +18,9 @@ class AQIVisualizationView(NSView):
 
     @objc.python_method
     def setup(self):
-        self.textColor = NSColor.blackColor()
+        self.textColor = NSColor.labelColor()
         self.headerHeight = 150  # Space for header
-        
+
         self.pollutant_levels = {
             'pm25': [
                 (0, 50, NSColor.systemGreenColor()),
@@ -34,8 +34,8 @@ class AQIVisualizationView(NSView):
                 (0, 50, NSColor.systemGreenColor()),
                 (51, 100, NSColor.yellowColor()),
                 (101, 150, NSColor.orangeColor()),
-                (251, 200, NSColor.redColor()),
-                (302, 300, NSColor.purpleColor()),
+                (151, 200, NSColor.redColor()),
+                (201, 300, NSColor.purpleColor()),
                 (301, 500, NSColor.darkGrayColor())
             ],
             # For gases that typically stay under 50, we'll use a gradient approach
@@ -54,13 +54,13 @@ class AQIVisualizationView(NSView):
             'humidity': NSColor.magentaColor(),
             'wind': NSColor.lightGrayColor()
         }
-        
+
         self.metric_labels = {
             'pm25': 'PM2.5', 'pm10': 'PM10', 'o3': 'O3', 'no2': 'NO2', 'so2': 'SO2',
             'co': 'CO', 'temperature': 'Temp.', 'pressure': 'Pressure',
             'humidity': 'Humidity', 'wind': 'Wind'
         }
-        
+
 
         self.metrics = ['pm25', 'pm10', 'o3', 'no2', 'so2', 'co', 'temperature', 'pressure', 'humidity', 'wind']
         self.chartPadding = 5
@@ -68,7 +68,7 @@ class AQIVisualizationView(NSView):
         self.currentValueWidth = 35
         self.minMaxWidth = 55
         self.aqi_levels = [
-            (0, 50, "Healthy", NSColor.systemGreenColor()),
+            (0, 50, "Good", NSColor.systemGreenColor()),
             (51, 100, "Moderate", NSColor.yellowColor()),
             (101, 150, "Unhealthy for Sensitive Groups", NSColor.orangeColor()),
             (151, 200, "Unhealthy", NSColor.redColor()),
@@ -79,63 +79,65 @@ class AQIVisualizationView(NSView):
     def drawRect_(self, dirtyRect):
         NSColor.windowBackgroundColor().setFill()
         NSBezierPath.fillRect_(dirtyRect)
-        
+
         # Draw main sections
         self.drawHeader()
         self.drawCharts()
 
     @objc.python_method
     def get_aqi_info(self, aqi):
+        if aqi > 500:
+            return NSColor.darkGrayColor(), "Hazardous"
         for low, high, text, color in self.aqi_levels:
             if low <= aqi <= high:
                 return color, text
-        return NSColor.blackColor(), "Unknown"
+        return NSColor.labelColor(), "Unknown"
 
     @objc.python_method
     def drawHeader(self):
         if not self.data:
             return
 
-        headerRect = NSMakeRect(0, self.bounds().size.height - self.headerHeight, 
+        headerRect = NSMakeRect(0, self.bounds().size.height - self.headerHeight,
                             self.bounds().size.width, self.headerHeight)
-        
+
         # Get latest data point
         latest_data = self.data[0]
         city_name = latest_data[1]  # City is index 1 in the tuple
         aqi_value = latest_data[2]  # AQI is index 2 in the tuple
         timestamp = latest_data[0]  # Timestamp is index 0
-    
+
         # Parse and format the timestamp
         dt = datetime.fromisoformat(timestamp)
         formatted_time = dt.strftime("%A %I:%M%p").replace("AM", "am").replace("PM", "pm")
         # Remove leading zero from hour if present
         formatted_time = formatted_time.lstrip("0")
-            
+
         # Draw city name - increased vertical space and moved up
         cityAttrs = {
             NSFontAttributeName: NSFont.boldSystemFontOfSize_(16),
-            NSForegroundColorAttributeName: NSColor.blackColor(),
+            NSForegroundColorAttributeName: NSColor.labelColor(),
         }
         # Increased height from 30 to 50 for two lines, and adjusted y position
-        cityRect = NSMakeRect(10, headerRect.origin.y + 65, 
+        cityRect = NSMakeRect(10, headerRect.origin.y + 65,
                             headerRect.size.width - 20, 50)
-        
+
         # Create paragraph style for city name to handle wrapping
         cityParagraph = NSMutableParagraphStyle.alloc().init()
         cityParagraph.setLineBreakMode_(NSLineBreakByWordWrapping)
         cityAttrs[NSParagraphStyleAttributeName] = cityParagraph
-        
+
         NSString.stringWithString_(city_name).drawInRect_withAttributes_(cityRect, cityAttrs)
-        
+
         # Draw AQI box and text
         aqi_color, aqi_text = self.get_aqi_info(aqi_value)
-        
+
         # Rounded corners for my friends
         aqiBoxRect = NSMakeRect(10, headerRect.origin.y + 15, 80, 60)
         roundedPath = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(aqiBoxRect, 10.0, 10.0)
         aqi_color.setFill()
         roundedPath.fill()
-        
+
         # if you change this you HAVE to change aqiTextRect
         aqiAttrs = {
             NSFontAttributeName: NSFont.boldSystemFontOfSize_(32),
@@ -144,17 +146,17 @@ class AQIVisualizationView(NSView):
         paragraph = NSMutableParagraphStyle.alloc().init()
         paragraph.setAlignment_(NSTextAlignmentCenter)
         aqiAttrs[NSParagraphStyleAttributeName] = paragraph
-        
+
         # origin.y + 10 and width,40 is as close as it gets to center do not FUCK this
-        aqiTextRect = NSMakeRect(aqiBoxRect.origin.x, 
-                                 aqiBoxRect.origin.y + 10, 
+        aqiTextRect = NSMakeRect(aqiBoxRect.origin.x,
+                                 aqiBoxRect.origin.y + 10,
                                 aqiBoxRect.size.width, 40)
-        
+
         NSString.stringWithString_(str(aqi_value)).drawInRect_withAttributes_(
             aqiTextRect, aqiAttrs)
-        
+
         # Higher makes text go higher "AQI QUALITIATIVE READING"
-        qualTextRect = NSMakeRect(100, headerRect.origin.y + 45, 
+        qualTextRect = NSMakeRect(100, headerRect.origin.y + 45,
                                 headerRect.size.width - 110, 30)
         qualAttrs = {
             NSFontAttributeName: NSFont.boldSystemFontOfSize_(20),
@@ -162,7 +164,7 @@ class AQIVisualizationView(NSView):
         }
         NSString.stringWithString_(aqi_text).drawInRect_withAttributes_(
             qualTextRect, qualAttrs)
-        
+
         # Last updated time - adjusted position
         timestamp = latest_data[0]  # Timestamp is index 0
         updateAttrs = {
@@ -170,7 +172,7 @@ class AQIVisualizationView(NSView):
             NSForegroundColorAttributeName: NSColor.grayColor(),
         }
         ## +15 is the rectangle height so YLOCish, +35 is the size of the rectangle
-        updateRect = NSMakeRect(100, headerRect.origin.y + 15, 
+        updateRect = NSMakeRect(100, headerRect.origin.y + 15,
                             headerRect.size.width - 110, 35)
         NSString.stringWithString_(f"Updated: {formatted_time}").drawInRect_withAttributes_(
         updateRect, updateAttrs)
@@ -180,12 +182,12 @@ class AQIVisualizationView(NSView):
         # Convert colors to RGB color space
         color1_rgb = color1.colorUsingColorSpaceName_("NSCalibratedRGBColorSpace")
         color2_rgb = color2.colorUsingColorSpaceName_("NSCalibratedRGBColorSpace")
-        
+
         # Interpolate between colors
         r = color1_rgb.redComponent() + (color2_rgb.redComponent() - color1_rgb.redComponent()) * progress
         g = color1_rgb.greenComponent() + (color2_rgb.greenComponent() - color1_rgb.greenComponent()) * progress
         b = color1_rgb.blueComponent() + (color2_rgb.blueComponent() - color1_rgb.blueComponent()) * progress
-        
+
         return NSColor.colorWithRed_green_blue_alpha_(r, g, b, 1.0)
 
     @objc.python_method
@@ -193,13 +195,13 @@ class AQIVisualizationView(NSView):
         """Get color for pressure value based on the defined range"""
         min_pressure = self.pressure_range['min']
         max_pressure = self.pressure_range['max']
-        
+
         # Clamp value to our range
         value = max(min_pressure, min(max_pressure, value))
-        
+
         # Calculate progress through the range
         progress = (value - min_pressure) / (max_pressure - min_pressure)
-        
+
         # Interpolate between yellow and orange
         return self.interpolate_colors(NSColor.systemBlueColor(), NSColor.blueColor(), progress)
 
@@ -208,10 +210,10 @@ class AQIVisualizationView(NSView):
         # Special handling for pressure
         if metric == 'pressure':
             return self.get_pressure_color(value)
-            
+
         if metric in self.static_colors:
             return self.static_colors[metric]
-        
+
         if metric in self.pollutant_levels:
             if metric in ['o3', 'no2', 'so2', 'co']:
                 # For gases that typically stay under 50, interpolate between green and yellow
@@ -227,7 +229,7 @@ class AQIVisualizationView(NSView):
                     if low <= value <= high:
                         return color
                 return NSColor.darkGrayColor()  # Default color if out of all ranges
-        
+
         return NSColor.grayColor()  # Default color for unknown metrics
 
     @objc.python_method
@@ -253,7 +255,7 @@ class AQIVisualizationView(NSView):
         # Adjust available height to account for header
         availableHeight = self.bounds().size.height - self.headerHeight
         chart_height = (availableHeight / len(self.metrics)) - self.chartPadding
-        
+
         for i, metric in enumerate(reversed(self.metrics)):
             y_position = i * (chart_height + self.chartPadding)
             self.drawChart(metric, NSMakeRect(0, y_position, self.bounds().size.width, chart_height))
@@ -285,29 +287,31 @@ class AQIVisualizationView(NSView):
         def adjust_histogram_bounds(min_value, max_value, metric, current_value=None):
             if metric == 'pressure':
                 # Use the actual min/max within our fixed bounds
-                return (max(self.pressure_range['min'], min_value), 
-                       min(self.pressure_range['max'], max_value))
+                return (min(min_value, self.pressure_range['min']),
+                       max(max_value, self.pressure_range['max']))
             elif metric == 'temperature':
                 # No need to convert here since values are already converted
-                adjusted_min = min_value * 0.75
-                adjusted_max = max_value * 1.25
+                padding = max((max_value - min_value) * 0.15, 1)
+                adjusted_min = min_value - padding
+                adjusted_max = max_value + padding
                 return adjusted_min, adjusted_max
             elif self.is_pollutant(metric) and current_value is not None:
                 return self.get_pollutant_range(current_value)
             else:
-                adjusted_min = min_value * 0.75
-                adjusted_max = max_value * 1.25
+                padding = max((max_value - min_value) * 0.15, 1)
+                adjusted_min = min_value - padding
+                adjusted_max = max_value + padding
                 return adjusted_min, adjusted_max
 
         data_index_map = {
-            'timestamp': 0, 'city': 1, 'aqi': 2, 'pm25': 3, 'pm10': 4, 
-            'o3': 5, 'no2': 6, 'so2': 7, 'co': 8, 'temperature': 9, 
+            'timestamp': 0, 'city': 1, 'aqi': 2, 'pm25': 3, 'pm10': 4,
+            'o3': 5, 'no2': 6, 'so2': 7, 'co': 8, 'temperature': 9,
             'pressure': 10, 'humidity': 11, 'wind': 12
         }
         metric_index = data_index_map[metric]
-        
+
         metric_data = [row[metric_index] if row[metric_index] is not None else None for row in self.data]
-        
+
         if metric == 'temperature':
             valid_data = [self.convert_temperature(float(value)) for value in metric_data if value is not None]
             # Store converted values for plotting
@@ -326,7 +330,7 @@ class AQIVisualizationView(NSView):
         label_text = self.metric_labels[metric]
         if metric == 'temperature':
             label_text = f"{label_text} ({self.temperature_unit})"
-        
+
 
         NSString.stringWithString_(self.metric_labels[metric]).drawAtPoint_withAttributes_(
             NSMakePoint(5, rect.origin.y + rect.size.height - 25), label_attrs)
@@ -357,27 +361,27 @@ class AQIVisualizationView(NSView):
             else:
                 max_value = max(valid_data)
                 min_value = min(valid_data)
-            
+
             # Get current value for range calculation
             current_val = float(metric_data[0]) if metric_data[0] is not None else None
             if metric == 'temperature' and current_val is not None:
                 current_val = self.convert_temperature(current_val)
-            
+
             adjusted_min, adjusted_max = adjust_histogram_bounds(min_value, max_value, metric, current_val)
             value_range = adjusted_max - adjusted_min
 
             histogram_rect = NSMakeRect(
-                self.labelWidth + self.currentValueWidth, 
+                self.labelWidth + self.currentValueWidth,
                 rect.origin.y,
                 self.bounds().size.width - self.labelWidth - self.currentValueWidth - self.minMaxWidth,
                 rect.size.height
             )
             bar_width = histogram_rect.size.width / len(self.data)
-            
-            for i, value in enumerate(converted_metric_data):
+
+            for i, value in enumerate(reversed(converted_metric_data)):
                 if value is not None:
                     value = float(value)
-                    
+
                     if value_range == 0:
                         height = histogram_rect.size.height * 0.5
                     else:
@@ -388,7 +392,7 @@ class AQIVisualizationView(NSView):
 
                     x_position = histogram_rect.origin.x + i * bar_width
                     bar_rect = NSMakeRect(x_position, rect.origin.y, bar_width - 1, height)
-                    
+
                     color = self.get_color_for_metric(metric, value)
                     color.setFill()
                     NSBezierPath.fillRect_(bar_rect)
@@ -400,17 +404,17 @@ class AQIVisualizationView(NSView):
             }
             min_x = self.bounds().size.width - self.minMaxWidth + 5
             max_x = self.bounds().size.width - self.minMaxWidth / 2 + 5
-            
+
             if metric == 'pressure':
                 # Use fixed values for pressure with one decimal place
                 min_text = f"{adjusted_min:.0f}"
                 max_text = f"{adjusted_max:.0f}"
-            
+
             else:
                 # For other metrics, use actual min/max with rounding
                 min_text = f"{min_value:.0f}"
                 max_text = f"{max_value:.0f}"
-            
+
             NSString.stringWithString_(min_text).drawAtPoint_withAttributes_(
                 NSMakePoint(min_x, rect.origin.y + rect.size.height - 25), value_attrs)
             NSString.stringWithString_(max_text).drawAtPoint_withAttributes_(

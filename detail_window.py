@@ -19,11 +19,6 @@ from aqi_visualization_view import AQIVisualizationView
 import logging
 from login_item_manager import LoginItemManager
 
-logging.basicConfig(
-    filename="detailwindow.log",
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
 
 
 class DetailWindow(NSObject):
@@ -140,7 +135,7 @@ class DetailWindow(NSObject):
             self.checkbox.setState_(NSControlStateValueOff)
 
         self.checkbox.setTarget_(self)
-        self.checkbox.setAction_(objc.selector(self.toggleLoginItem_, signature=b"v@:"))
+        self.checkbox.setAction_(self.toggleLoginItem_)
         contentView.addSubview_(self.checkbox)
 
         # DONE button
@@ -198,7 +193,7 @@ class DetailWindow(NSObject):
             self.window.close()
             self.window = None
             NSApp.updateWindows()
-            NSApp.sendEvent_(NSApp.currentEvent())
+
             logging.info("Window closed successfully")
         else:
             logging.warning("Window is None, cannot close")
@@ -243,7 +238,7 @@ class DetailWindow(NSObject):
             logging.debug("Window exists, closing and releasing it")
             self.window.setDelegate_(None)
             self.window.close()
-            self.window.release()
+
         self.window = None
         logging.debug("Window set to None in dealloc")
         objc.super(DetailWindow, self).dealloc()

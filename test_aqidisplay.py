@@ -1,205 +1,205 @@
-import unittest
-import mock
+import contextlib
+from concurrent.futures import Future
 from datetime import datetime, timedelta
-import tempfile
+import io
+import logging
 import os
-import sqlite3
-from app import AQIDisplay
-from aqi_visualization_view import AQIVisualizationView
-from detail_window import DetailWindow
-from search_city_window import SearchCityWindow
-from Foundation import NSMakeRect, NSColor  # For mocking NSRect and NSColor
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+import requests
+from core import APIError, Client, History, Redact, SingleInstance, load_token, save_settings, load_settings
+from login_item_manager import launch_configuration, LoginItemManager
+from migrate_legacy import migrate
 
-class TestAQIDisplay(unittest.TestCase):
+
+def reading(city='Test City', aqi=42):
+    return {'aqi': aqi, 'city': {'name': city}, 'iaqi': {'t': {'v': 20}}}
+
+
+class CoreTests(unittest.TestCase):
     def setUp(self):
-        self.app = AQIDisplay()
-        self.app.db_connection = sqlite3.connect(':memory:')
-        self.app.create_table()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.env = patch.dict(os.environ, {'OPENAIR_DATA_DIR': self.directory.name, 'WAQI_API_TOKEN': ''})
+        self.env.start()
+        self.addCleanup(self.env.stop)
 
-    def tearDown(self):
-        if hasattr(self, 'app') and self.app.db_connection:
-            self.app.db_connection.close()
+    def test_missing_token_no_request(self):
+        with patch('core.requests.get') as get, self.assertRaises(APIError):
+            Client('').feed('here')
+        get.assert_not_called()
 
-    def test_parse_api_data(self):
-        """Test parsing of API data"""
-        test_data = {
-            'aqi': 50,
-            'iaqi': {
-                'pm25': {'v': 20},
-                'pm10': {'v': 30},
-                't': {'v': 25},
-                'h': {'v': 60}
-            },
-            'city': {'name': 'Test City'},
-            'forecast': {'daily': {}}
-        }
-        result = self.app.parse_api_data(test_data)
-        self.assertEqual(result['aqi'], 50)
-        self.assertEqual(result['visualization_data']['PM2.5']['current'], 20)
-        self.assertEqual(result['visualization_data']['PM10']['current'], 30)
-        self.assertEqual(result['visualization_data']['Temp.']['current'], 25)
-        self.assertEqual(result['visualization_data']['Humidity']['current'], 60)
+    def test_token_file_and_environment_override(self):
+        Path(self.directory.name, 'waqi-token').write_text('local-secret\n')
+        self.assertEqual(load_token(), 'local-secret')
+        with patch.dict(os.environ, WAQI_API_TOKEN='override'):
+            self.assertEqual(load_token(), 'override')
 
-    def test_title_formatting(self):
-        """Test menu bar title formatting"""
-        test_data = {
-            'aqi': 50,
-            'iaqi': {
-                'pm25': {'v': 20},
-                't': {'v': 25},
-                'h': {'v': 60}
-            }
-        }
-        self.app.cached_data = test_data
-        self.app.current_city_name = "Test City"
-        
-        # Test with only AQI shown
-        self.app.format_options = {key: False for key in self.app.format_options}
-        self.app.format_options['AQI'] = True
-        self.app.update_title()
-        self.assertEqual(self.app.title, "AQI: 50")
+    def test_feed_locations_and_timeout(self):
+        with patch('core.requests.get') as get:
+            get.return_value.json.return_value = {'status': 'ok', 'data': reading()}
+            for location, suffix in [('here','here'), ('@123','@123'), ('1;2','geo:1;2'), ('San Francisco','San%20Francisco')]:
+                self.assertEqual(Client('secret').feed(location)['aqi'],42)
+                self.assertEqual(get.call_args.args[0], f'https://api.waqi.info/feed/{suffix}/')
+                self.assertEqual(get.call_args.kwargs['timeout'], (5,15))
+                self.assertEqual(get.call_args.kwargs['params'], {'token':'secret'})
 
-        # Test with AQI and temperature (°F)
-        self.app.format_options['Temperature'] = True
-        self.app.temperature_unit = "°F"
-        self.app.update_title()
-        self.assertEqual(self.app.title, "AQI: 50 | 77.0°F")
+    def test_unavailable_and_malformed_feed(self):
+        with patch('core.requests.get') as get:
+            for data in [None, [], {}, reading(aqi='-'), reading(aqi='nan'), reading(aqi=-1)]:
+                get.return_value.json.return_value = {'status': 'ok', 'data': data}
+                with self.assertRaises(APIError):
+                    Client('secret').feed('here')
 
-        # Test with AQI and temperature (°C)
-        self.app.temperature_unit = "°C"
-        self.app.update_title()
-        self.assertEqual(self.app.title, "AQI: 50 | 25°C")
+    def test_invalid_json_and_http_error_do_not_expose_secret(self):
+        for error in [ValueError('bad json token=secret'), requests.Timeout('https://host/?token=secret')]:
+            with patch('core.requests.get', side_effect=error):
+                with self.assertRaises(APIError) as caught:
+                    Client('secret').feed('here')
+                self.assertNotIn('secret', str(caught.exception))
 
-    @mock.patch('requests.get')
-    def test_get_aqi_data(self, mock_get):
-        """Test fetching AQI data"""
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'status': 'ok',
-            'data': {
-                'aqi': 50,
-                'city': {'name': 'Greatest City'},
-                'iaqi': {
-                    'pm25': {'v': 20},
-                    't': {'v': 25},
-                    'h': {'v': 60}
-                }
-            }
-        }
-        mock_get.return_value = mock_response
-        result = self.app.get_aqi_data("37.7749;-122.4194")
-        self.assertIsNotNone(result)
-        self.assertEqual(result['aqi'], 50)
-        self.assertEqual(result['city']['name'], 'Greatest City')
+    def test_missing_weather_remains_missing(self):
+        with patch('core.requests.get') as get:
+            data = reading()
+            data['iaqi'] = {'t': {'v':'-'}, 'w': {'v':0}, 'h':None}
+            get.return_value.json.return_value = {'status':'ok','data':data}
+            self.assertEqual(Client('secret').feed('here')['iaqi'], {'w':{'v':0.0}})
 
-    def test_store_aqi_data(self):
-        """Test storing AQI data in the database"""
-        test_data = {
-            'aqi': 75,
-            'city': {'name': 'Stored City'},
-            'iaqi': {
-                'pm25': {'v': 25},
-                't': {'v': 20},
-                'h': {'v': 50}
-            }
-        }
-        self.app.store_aqi_data(test_data)
-        cursor = self.app.db_connection.cursor()
-        cursor.execute("SELECT aqi, city, pm25, temperature, humidity FROM aqi_data")
-        result = cursor.fetchone()
-        self.assertEqual(result, (75, 'Stored City', 25.0, 20.0, 50.0))
+    def test_search_encoding_and_validation(self):
+        with patch('core.requests.get') as get:
+            get.return_value.json.return_value = {'status':'ok','data':[{}, {'uid':1,'station':{'name':'A'}}]}
+            self.assertEqual(len(Client('secret').search(' A & B ')),1)
+            self.assertEqual(get.call_args.kwargs['params']['keyword'],'A & B')
+            get.reset_mock()
+            self.assertEqual(Client('secret').search(' '),[])
+            get.assert_not_called()
+
+    def test_history_retains_old_and_different_cities(self):
+        history = History(':memory:')
+        self.addCleanup(history.connection.close)
+        now = datetime.now().replace(minute=30,second=0,microsecond=0)
+        history.store(reading('Old'), now-timedelta(days=500))
+        history.store(reading('A'),now-timedelta(minutes=1))
+        history.store(reading('B'),now)
+        history.store(reading('A',60),now)
+        self.assertEqual(history.connection.execute('SELECT COUNT(*) FROM aqi_data').fetchone()[0],4)
+        self.assertEqual(len(history.recent('A')),1)
+        self.assertEqual(history.recent('A')[0][2],60)
+        self.assertIsNone(history.recent('A')[0][3])
+        self.assertEqual(history.recent('A')[0][9],20)
+        self.assertEqual(len(history.recent('B')),1)
+
+    def test_settings_round_trip_and_bad_json(self):
+        save_settings({'city':'@123'})
+        self.assertEqual(load_settings()['city'],'@123')
+        Path(self.directory.name,'settings.json').write_text('broken')
+        self.assertEqual(load_settings(),{})
+
+    def test_lock_loser_does_not_release_owner(self):
+        first, second, third = SingleInstance(), SingleInstance(), SingleInstance()
+        self.addCleanup(first.cleanup)
+        self.addCleanup(second.cleanup)
+        self.addCleanup(third.cleanup)
+        self.assertFalse(first.is_running())
+        self.assertTrue(second.is_running())
+        second.cleanup()
+        self.assertTrue(third.is_running())
+        first.cleanup()
+        self.assertFalse(third.is_running())
+
+    def test_logs_redact_token_and_exception(self):
+        with patch.dict(os.environ, WAQI_API_TOKEN='secret'):
+            record = logging.LogRecord('test',20,'',0,'URL token=%s other secret',('secret',),None)
+            Redact().filter(record)
+            self.assertNotIn('secret',record.getMessage())
+
+    def test_launch_config_source_and_bundle(self):
+        import sys
+        source = launch_configuration(sys.executable,False)
+        self.assertTrue(source['ProgramArguments'][1].endswith('/app.py'))
+        bundle = launch_configuration(sys.executable,True)
+        self.assertEqual(bundle['ProgramArguments'],[str(Path(sys.executable).absolute())])
+        self.assertNotIn('StartInterval',bundle)
+        self.assertNotIn('WorkingDirectory',bundle)
+
+    def test_login_construction_does_not_enable(self):
+        with patch('login_item_manager.subprocess.run') as run:
+            LoginItemManager()
+            run.assert_not_called()
+
+    def test_legacy_import_preserves_existing_files(self):
+        source = Path(self.directory.name,'legacy')
+        source.mkdir()
+        (source/'app.py').write_text('self.token = "test-secret"')
+        history = History(source/'aqi_data.db')
+        history.store(reading('Legacy'))
+        history.connection.close()
+        migrate(source)
+        self.assertEqual(load_token(),'test-secret')
+        target = Path(self.directory.name,'aqi_data.db')
+        before = target.read_bytes()
+        Path(self.directory.name,'waqi-token').write_text('new-secret')
+        migrate(source)
+        self.assertEqual(target.read_bytes(),before)
+        self.assertEqual(load_token(),'new-secret')
+        self.assertTrue((source/'aqi_data.db').exists())
 
 
-class TestAQIVisualizationView(unittest.TestCase):
-    def setUp(self):
-        # Mock frame and sample data for the last 24 hours
-        self.frame = NSMakeRect(0, 0, 400, 600)
-        sample_data = [
-            (
-                (datetime.now() - timedelta(hours=i)).isoformat(),  # timestamp
-                'Test City',  # city
-                50 + i,      # aqi
-                20.0 + i,    # pm25
-                30.0,        # pm10
-                10.0,        # o3
-                5.0,         # no2
-                2.0,         # so2
-                1.0,         # co
-                25.0,        # temperature
-                1013.0,      # pressure
-                60.0,        # humidity
-                5.0          # wind
-            )
-            for i in range(24)
-        ]
-        self.view = AQIVisualizationView.alloc().initWithFrame_andData_andTempUnit_(self.frame, sample_data, "°F")
-        self.view.setup()
+class AppTests(unittest.TestCase):
+    def make_app(self):
+        from app import AQIDisplay
+        app = Mock()
+        app.pending = None
+        app.pending_city = 'here'
+        app.current_city = 'here'
+        app.search_window = None
+        app.cached_data = None
+        app.last_update_time = __import__('time').monotonic()
+        app.update_interval = 300
+        app.error = None
+        app.format_options = {'City':False,'AQI':True,'PM2.5':False,'PM10':False,'O₃':False,'NO₂':False,'SO₂':False,'CO':False,'Temperature':True,'Humidity':False,'Wind':False}
+        app.temperature_unit = '°F'
+        return app, AQIDisplay
 
-    def test_get_aqi_info(self):
-        """Test AQI level and color determination"""
-        color, text = self.view.get_aqi_info(50)
-        self.assertEqual(text, "Healthy")
-        self.assertEqual(color, NSColor.systemGreenColor())
+    def test_offline_first_launch_title(self):
+        app, cls = self.make_app()
+        app.client.token = ''
+        cls.update_title(app)
+        self.assertEqual(app.title,'OpenAir · Setup')
 
-        color, text = self.view.get_aqi_info(150)
-        self.assertEqual(text, "Unhealthy for Sensitive Groups")
-        self.assertEqual(color, NSColor.orangeColor())
+    def test_temperature_and_stale_title(self):
+        app, cls = self.make_app()
+        app.cached_data = reading()
+        app.error = 'offline'
+        cls.update_title(app)
+        self.assertEqual(app.title,'AQI: 42 | 68.0°F · Stale')
 
-    def test_get_pressure_color(self):
-        """Test pressure color interpolation"""
-        min_pressure = self.view.pressure_range['min']
-        max_pressure = self.view.pressure_range['max']
-        normal_pressure = (min_pressure + max_pressure) / 2
-        color = self.view.get_pressure_color(normal_pressure)
-        # Since it's an interpolation, we check it's not None and assume it's between systemBlue and blue
-        self.assertIsNotNone(color)
+    def test_failed_refresh_preserves_last_reading(self):
+        app, cls = self.make_app()
+        app.cached_data = reading()
+        app.pending = Future()
+        app.pending.set_exception(APIError('offline'))
+        cls.update(app,None)
+        self.assertEqual(app.cached_data['aqi'],42)
+        self.assertEqual(app.error,'offline')
+        app.history.store.assert_not_called()
 
-    def test_get_color_for_metric(self):
-        """Test color assignment for different metrics"""
-        self.assertEqual(self.view.get_color_for_metric('pm25', 25), NSColor.systemGreenColor())
-        self.assertEqual(self.view.get_color_for_metric('temperature', 25), NSColor.orangeColor())
-        self.assertEqual(self.view.get_color_for_metric('o3', 40), self.view.interpolate_colors(NSColor.systemGreenColor(), NSColor.yellowColor(), 0.8))
+    def test_obsolete_station_result_is_discarded(self):
+        app, cls = self.make_app()
+        app.pending_city = '@old'
+        app.pending = Future()
+        app.pending.set_result(reading('Old'))
+        cls.update(app,None)
+        self.assertIsNone(app.cached_data)
+        app.history.store.assert_not_called()
 
-class TestSearchCityWindow(unittest.TestCase):
-    def setUp(self):
-        self.app = mock.Mock()
-        self.app.base_url = "https://api.waqi.info"
-        self.app.token = "test_token"
-        self.window = SearchCityWindow.alloc().initWithApp_(self.app)
-        self.window.location_input = mock.Mock()
-        self.window.result_table = mock.Mock()
-        self.window.window = mock.Mock()
-        self.window.results = []
-
-    @mock.patch('requests.get')
-    def test_performSearch_(self, mock_get):
-        """Test performing a city search"""
-        self.window.location_input.stringValue.return_value = "San Francisco"
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'status': 'ok',
-            'data': [
-                {'station': {'name': 'San Francisco'}, 'aqi': '45', 'time': {'stime': '2023-10-10 12:00'}, 'uid': 123}
-            ]
-        }
-        mock_get.return_value = mock_response
-        self.window.performSearch_(None)
-        mock_get.assert_called_with("https://api.waqi.info/search/?token=test_token&keyword=San Francisco")
-        self.assertEqual(len(self.window.results), 1)
-        self.assertEqual(self.window.results[0]['station']['name'], 'San Francisco')
-        self.window.result_table.reloadData.assert_called_once()
-
-    def test_tableViewSelectionDidChange_(self):
-        """Test selecting a city from the table"""
-        self.window.results = [{'station': {'name': 'San Francisco'}, 'aqi': '45', 'uid': 123}]
-        self.window.result_table.selectedRow.return_value = 0
-        self.window.tableViewSelectionDidChange_(None)
-        self.assertEqual(self.app.current_city, "@123")
-        self.assertEqual(self.app.current_city_name, "San Francisco")
-        self.app.update.assert_called_with(None, force=True)
-        self.window.window.close.assert_called_once()
+    def test_refresh_does_not_overlap(self):
+        app, cls = self.make_app()
+        app.pending = Future()
+        cls.update(app,None,force=True)
+        app.executor.submit.assert_not_called()
 
 
 if __name__ == '__main__':

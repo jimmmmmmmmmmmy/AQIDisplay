@@ -18,7 +18,8 @@ from AppKit import (
     NSBezelBorder,
     NSTextFieldCell,
 )
-import requests
+from core import APIError
+import logging
 
 
 class SearchCityWindow(NSObject):
@@ -84,7 +85,7 @@ class SearchCityWindow(NSObject):
         self.search_button.setTitle_("Search")
         self.search_button.setTarget_(self)
         self.search_button.setAction_(
-            objc.selector(self.performSearch_, signature=b"v@:")
+            self.performSearch_
         )
         contentView.addSubview_(self.search_button)
 
@@ -108,21 +109,21 @@ class SearchCityWindow(NSObject):
         scrollView.setDocumentView_(self.result_table)
         self.window.contentView().addSubview_(scrollView)
 
-    def performSearch_(self, sender):
-        location = self.location_input.stringValue()
-        url = f"{self.app.base_url}/search/?token={self.app.token}&keyword={location}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            if data["status"] == "ok":
-                self.results = data["data"]
-                self.result_table.reloadData()
-            else:
-                print(f"Error: {data['data']}")
-                self.results = []  # Clear results on error
-        else:
-            print(f"Error: Unable to fetch data. Status code: {response.status_code}")
-            self.results = []  # Clear results on error
+    @objc.python_method
+    def poll_search(self):
+        future = getattr(self, '_pending_search', None)
+        if future is None or not future.done():
+            return
+        self._pending_search = None
+        if self.window is None:
+            return
+        try:
+            self.results = future.result()
+            self.window.setTitle_("Search City" if self.results else "No stations found")
+        except APIError as error:
+            self.results = []
+            self.window.setTitle_(str(error))
+        self.search_button.setEnabled_(True)
         self.result_table.reloadData()
 
     def numberOfRowsInTableView_(self, tableView):
@@ -136,41 +137,26 @@ class SearchCityWindow(NSObject):
         if column_id == "City":
             return result["station"]["name"]
         elif column_id == "AQI":
-            return str(result["aqi"])
+            return str(result.get("aqi", "—"))
         elif column_id == "Time":
-            return str(result["time"]["stime"])
+            return str(result.get("time", {}).get("stime", "—"))
 
     def tableViewSelectionDidChange_(self, notification):
-        selected_row = self.result_table.selectedRow()
-        if selected_row >= 0 and selected_row < len(self.results):
-            result = self.results[selected_row]
-            if "uid" in result:
-                self.app.current_city = f"@{result['uid']}"
-                self.app.current_city_name = result["station"]["name"]
-                self.app.update(None, force=True)
-                if self.app.cached_data:  # Only close if update succeeds
-                    self.window.close()
-                else:
-                    logging.error("Update failed, keeping window open")
-            else:
-                logging.error("No UID found in result")
+        row = self.result_table.selectedRow()
+        if 0 <= row < len(self.results):
+            result = self.results[row]
+            self.app.select_city(f"@{result['uid']}", result['station']['name'])
+            self.window.close()
 
     def performSearch_(self, sender):
-        location = self.location_input.stringValue()
-        url = f"{self.app.base_url}/search/?token={self.app.token}&keyword={location}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            if data["status"] == "ok":
-                self.results = data["data"]
-                print(self.results)
-            else:
-                print(f"Error: {data['data']}")
-                self.results = []
-        else:
-            print(f"Error: Unable to fetch data. Status code: {response.status_code}")
-            self.results = []
+        location = self.location_input.stringValue().strip()
+        if not location or getattr(self, '_pending_search', None):
+            return
+        self.results = []
         self.result_table.reloadData()
+        self.search_button.setEnabled_(False)
+        self.window.setTitle_("Searching…")
+        self._pending_search = self.app.executor.submit(self.app.client.search, location)
 
     def windowShouldClose_(self, sender):
         return True
