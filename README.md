@@ -2,6 +2,14 @@
 
 A native macOS menu bar app for air quality, station history, and weather.
 
+## Screenshots
+
+| Light | Dark |
+| --- | --- |
+| ![Air Quality in light mode](docs/screenshots/air-quality-light.png) | ![Air Quality in dark mode](docs/screenshots/air-quality-dark.png) |
+
+Air Quality window content shown with sample data.
+
 ## Features
 
 - Compact menu bar readings with a color-coded air quality indicator
