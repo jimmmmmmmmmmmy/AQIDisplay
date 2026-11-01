@@ -27,10 +27,11 @@ final class AirModel: ObservableObject {
     init(preview: Bool = false) {
         if preview {
             hasToken = true
+            let latest = Calendar.current.dateInterval(of: .hour, for: now.addingTimeInterval(-3600))!.start
             reading = Reading(aqi: 42, city: "New York", stationTime: "Today, 11:00 AM", providers: ["Station provider"],
-                values: ["t": 22, "h": 58, "w": 2.4, "p": 1016, "pm25": 42, "pm10": 18, "o3": 12], observedAt: Date().addingTimeInterval(-3600), stationTimeZone: .current, stationID: 1)
+                values: ["t": 22, "h": 58, "w": 2.4, "p": 1016, "pm25": 42, "pm10": 18, "o3": 12], observedAt: latest, stationTimeZone: .current, stationID: 1)
             points = (0..<24).map { index in
-                let date = Date().addingTimeInterval(Double(index - 23) * 3600)
+                let date = latest.addingTimeInterval(Double(index - 23) * 3600)
                 return HistoryPoint(timestamp: String(index), date: date, aqi: index == 23 ? 42 : 30 + Int(12 * sin(Double(index) / 3)) + index / 2, temperature: 22)
             }
             return
@@ -229,7 +230,7 @@ struct OpenAirUI: App {
             QualityMenuLabel(color: model.menuDotColor, title: model.menuTitle)
                 .accessibilityLabel(model.accessibilitySummary)
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
         Window("Air Quality", id: "details") {
             DetailView(model: model)
         }
@@ -243,29 +244,6 @@ struct OpenAirUI: App {
         .windowResizability(.contentMinSize)
         Settings { SettingsView(model: model) }
     }
-}
-
-struct AirMenu: View {
-    @ObservedObject var model: AirModel
-    @Environment(\.openWindow) private var openWindow
-    var body: some View {
-        if let reading = model.reading {
-            Text(reading.city.shortened(to: 48))
-            Text("\(reading.aqi) AQI · \(reading.category)")
-            Text(model.freshnessMessage)
-        } else { Text(model.hasToken ? "Air Quality Unavailable" : "Welcome to OpenAir") }
-        if model.error != nil { Text(model.hasToken ? "Unable to Update" : "Add an API key in Settings") }
-        Divider()
-        Button("Air Quality", systemImage: "chart.xyaxis.line") { show("details") }
-        Button("Locations…", systemImage: "magnifyingglass") { show("locations") }
-        Button(model.refreshing ? "Updating…" : "Refresh", systemImage: "arrow.clockwise") { model.refresh() }
-            .disabled(model.refreshing).keyboardShortcut("r")
-        Divider()
-        SettingsLink { Label("Settings…", systemImage: "gearshape") }.keyboardShortcut(",")
-        Divider()
-        Button("Quit OpenAir") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
-    }
-    private func show(_ id: String) { openWindow(id: id); NSApplication.shared.activate(ignoringOtherApps: true) }
 }
 
 struct DetailView: View {
@@ -572,4 +550,45 @@ private func renderPreviews(to directory: URL) throws {
         try data.write(to: directory.appending(path: "air-quality-\(name).png"))
     }
     print("Rendered light and dark content previews (sample data)")
+    try renderPopupPreviews(to: directory)
+}
+
+@MainActor
+private func renderPopupPreviews(to directory: URL) throws {
+    for (name, scheme) in [
+        ("light", ColorScheme.light), ("dark", .dark), ("stale", .light),
+        ("long-name", .light), ("unavailable", .light), ("setup", .dark),
+        ("missing-weather", .light), ("no-history", .light)
+    ] {
+        let model = AirModel(preview: true)
+        if name == "stale" || name == "long-name" {
+            model.reading = Reading(aqi: 145,
+                city: "Northwest Monitoring Station, A Long Metropolitan District, California",
+                values: ["t": 22, "h": 58],
+                observedAt: model.now.addingTimeInterval(name == "stale" ? -4 * 3600 : -3600),
+                stationTimeZone: .current, stationID: 1)
+            if name == "stale" { model.error = AirError.connection.localizedDescription }
+        } else if name == "unavailable" || name == "setup" {
+            model.reading = nil
+            model.hasToken = name != "setup"
+            model.error = AirError.connection.localizedDescription
+        } else if name == "missing-weather" {
+            model.reading = Reading(aqi: 520, city: "Los Angeles-North Main Street",
+                observedAt: model.now.addingTimeInterval(-3600), stationTimeZone: .current, stationID: 1)
+        } else if name == "no-history" {
+            model.points = []
+        }
+        let content = AirMenu(model: model).environment(\.colorScheme, scheme)
+        let view = NSHostingView(rootView: content)
+        let size = view.fittingSize
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw AirError.storage }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else { throw AirError.storage }
+        try data.write(to: directory.appending(path: "popup-\(name).png"))
+    }
+    print("Rendered popup previews (sample data)")
 }
